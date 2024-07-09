@@ -102,6 +102,7 @@ private:
     priority_class_data& find_or_create_class(internal::priority_class pc);
     future<size_t> queue_request(internal::priority_class pc, internal::io_direction_and_length dnl, internal::io_request req, io_intent* intent, iovec_keeper iovs) noexcept;
     future<size_t> queue_one_request(internal::priority_class pc, internal::io_direction_and_length dnl, internal::io_request req, io_intent* intent, iovec_keeper iovs) noexcept;
+    void submit_blocks_discarding(queued_io_request_completion* desc, internal::io_request req) noexcept;
 
     // The fields below are going away, they are just here so we can implement deprecated
     // functions that used to be provided by the fair_queue and are going away (from both
@@ -170,6 +171,7 @@ public:
             size_t len, internal::io_request req, io_intent* intent, iovec_keeper iovs = {}) noexcept;
     future<size_t> submit_io_write(internal::priority_class priority_class,
             size_t len, internal::io_request req, io_intent* intent, iovec_keeper iovs = {}) noexcept;
+    future<size_t> submit_io_discard(internal::priority_class pc, size_t len, internal::io_request req, io_intent* intent) noexcept;
 
     void submit_request(queued_io_request_completion* desc, internal::io_request req) noexcept;
     void cancel_request(queued_io_request& req) noexcept;
@@ -191,7 +193,7 @@ public:
     void poll_io_queue();
 
     clock_type::time_point next_pending_aio() const noexcept;
-    fair_queue_entry::capacity_t request_capacity(internal::io_direction_and_length dnl) const noexcept;
+    fair_queue_entry::capacity_t request_capacity(internal::io_direction_and_length dnl, internal::io_request::operation io_operation) const noexcept;
 
     sstring mountpoint() const;
     dev_t dev_id() const noexcept;
@@ -230,6 +232,7 @@ private:
 
     const io_queue::config _config;
     size_t _max_request_length[2];
+    size_t _max_discard_request_length;
     boost::container::static_vector<fair_group, 2> _fgs;
     std::vector<std::unique_ptr<priority_class_data>> _priority_classes;
     util::spinlock _lock;
@@ -237,6 +240,7 @@ private:
 
     static fair_group::config make_fair_group_config(const io_queue::config& qcfg) noexcept;
     priority_class_data& find_or_create_class(internal::priority_class pc);
+    size_t get_max_request_length(internal::io_direction_and_length dnl, internal::io_request::operation io_operation) const;
 };
 
 inline const io_queue::config& io_queue::get_config() const noexcept {
@@ -252,7 +256,7 @@ inline dev_t io_queue::dev_id() const noexcept {
 }
 
 namespace internal {
-double request_tokens(io_direction_and_length dnl, const io_queue::config& cfg) noexcept;
+double request_tokens(io_direction_and_length dnl, const io_queue::config& cfg, io_request::operation io_operation) noexcept;
 }
 
 }

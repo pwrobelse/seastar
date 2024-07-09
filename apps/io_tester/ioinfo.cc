@@ -70,8 +70,8 @@ int main(int ac, char** av) {
                             out << YAML::Key << "capacities" << YAML::BeginMap;
                             for (size_t sz = 512; sz <= max_reqsz; sz <<= 1) {
                                 out << YAML::Key << sz << YAML::BeginMap;
-                                out << YAML::Key << "read" << YAML::Value << ioq.request_capacity(internal::io_direction_and_length(internal::io_direction_and_length::read_idx, sz));
-                                out << YAML::Key << "write" << YAML::Value << ioq.request_capacity(internal::io_direction_and_length(internal::io_direction_and_length::write_idx, sz));
+                                out << YAML::Key << "read" << YAML::Value << ioq.request_capacity(internal::io_direction_and_length(internal::io_direction_and_length::read_idx, sz), internal::io_request::operation::read);
+                                out << YAML::Key << "write" << YAML::Value << ioq.request_capacity(internal::io_direction_and_length(internal::io_direction_and_length::write_idx, sz), internal::io_request::operation::write);
                                 out << YAML::EndMap;
                             }
                             out << YAML::EndMap;
