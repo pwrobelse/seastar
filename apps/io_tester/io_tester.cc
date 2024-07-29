@@ -70,7 +70,7 @@ static auto random_seed = std::chrono::duration_cast<std::chrono::microseconds>(
 static thread_local std::default_random_engine random_generator(random_seed);
 
 class context;
-enum class request_type { seqread, seqwrite, randread, randwrite, append, cpu, unlink };
+enum class request_type { seqread, seqwrite, randread, randwrite, append, cpu, unlink, seqwrite_and_seqdiscard };
 
 namespace std {
 
@@ -278,6 +278,7 @@ protected:
     uint64_t _alignment;
     uint64_t _last_pos = 0;
     uint64_t _offset = 0;
+    bool _is_first_get_offset_call = true;
 
     seastar::scheduling_group _sg;
 
@@ -450,6 +451,7 @@ protected:
             { request_type::append , "APPEND" },
             { request_type::cpu , "CPU" },
             { request_type::unlink, "UNLINK" },
+            { request_type::seqwrite_and_seqdiscard, "SEQWRITE_SEQDISCARD" },
         }[_config.type];;
     }
 
@@ -514,7 +516,7 @@ protected:
     }
 
     bool is_sequential() const {
-        return (req_type() == request_type::seqread) || (req_type() == request_type::seqwrite);
+        return (req_type() == request_type::seqread) || (req_type() == request_type::seqwrite) || (req_type() == request_type::seqwrite_and_seqdiscard);
     }
     bool is_random() const {
         return (req_type() == request_type::randread) || (req_type() == request_type::randwrite);
@@ -525,7 +527,13 @@ protected:
         if (is_random()) {
             pos = _pos_distribution(random_generator) * req_size();
         } else {
-            pos = _last_pos + req_size();
+            if (!_is_first_get_offset_call) {
+                pos = _last_pos + req_size();
+            } else {
+                _is_first_get_offset_call = false;
+                pos = 0;
+            }
+
             if (is_sequential() && (pos >= _config.file_size)) {
                 pos = 0;
             }
@@ -694,6 +702,44 @@ public:
     }
 };
 
+class write_and_discard_io_class_data : public io_class_data {
+private:
+    enum class io_operation {
+        write,
+        discard
+    };
+
+    // During the first call to issue_request() 'current_operation' will be toggled to io_operation::write.
+    // Then, after issuing a given io_operation to all blocks of the file the operation type will be changed.
+    // The flow is: write_all_blocks -> discard_all_blocks -> write_all_blocks -> discard_all_blocks -> ...
+    io_operation current_operation{io_operation::discard};
+
+public:
+    write_and_discard_io_class_data(job_config cfg) : io_class_data(std::move(cfg)) {}
+
+    future<size_t> issue_request(char *buf, io_intent* intent) override {
+        const auto position = this->get_pos();
+        if (position == 0u) {
+            if (current_operation == io_operation::discard) {
+                current_operation = io_operation::write;
+            } else {
+                current_operation = io_operation::discard;
+            }
+        }
+
+        if (current_operation == io_operation::write) {
+            auto f = _file.dma_write(position, buf, this->req_size(), intent);
+            return on_io_completed(std::move(f));
+        } else {
+            const auto req_sz = this->req_size();
+            auto f = _file.discard(position, req_sz).then([req_sz]() {
+                return make_ready_future<size_t>(req_sz);
+            });
+            return on_io_completed(std::move(f));
+        }
+    }
+};
+
 class unlink_class_data : public class_data {
 private:
     sstring _dir_path{};
@@ -821,6 +867,8 @@ std::unique_ptr<class_data> job_config::gen_class_data() {
         return std::make_unique<cpu_class_data>(*this);
     } else if (type == request_type::unlink) {
         return std::make_unique<unlink_class_data>(*this);
+    } else if (type == request_type::seqwrite_and_seqdiscard) {
+        return std::make_unique<write_and_discard_io_class_data>(*this);
     } else if ((type == request_type::seqread) || (type == request_type::randread)) {
         return std::make_unique<read_io_class_data>(*this);
     } else {
@@ -903,6 +951,7 @@ struct convert<request_type> {
             { "append", request_type::append},
             { "cpu", request_type::cpu},
             { "unlink", request_type::unlink },
+            { "seqwrite_seqdiscard", request_type::seqwrite_and_seqdiscard }
         };
         auto reqstr = node.as<std::string>();
         if (!mappings.count(reqstr)) {
